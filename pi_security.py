@@ -1,14 +1,17 @@
-# pi_security.py - Complete security system for Pi Zero 2W + SIM7600G-H
+# pi_security.py - Pi Zero 2W + SIM7600G-H Security System with YOLOv5n
 import os
 import time
 import json
-import torch
 import cv2
+import torch
 import serial
 import numpy as np
 from datetime import datetime, timedelta
-import subprocess
-import tempfile
+
+# Import YOLOv5 backend
+from yolov5.models.common import DetectMultiBackend
+from yolov5.utils.general import non_max_suppression
+from yolov5.utils.torch_utils import select_device
 
 
 class PiSecuritySystem:
@@ -19,10 +22,10 @@ class PiSecuritySystem:
         self.config = self.load_config()
 
         # Initialize camera
-        self.camera = self.init_camera()
+        self.cap = self.init_camera()
 
         # Initialize detector
-        self.detector = self.init_detector()
+        self.model, self.device, self.names = self.init_detector()
 
         # Initialize SMS
         self.sms = self.init_sms()
@@ -43,7 +46,6 @@ class PiSecuritySystem:
             "detection_confidence": 0.4,
             "alert_cooldown_minutes": 5,
             "target_objects": ["person", "cat", "dog"],
-            "detection_interval": 5,
             "camera_resolution": [640, 480],
             "inference_size": 416,
         }
@@ -51,112 +53,128 @@ class PiSecuritySystem:
         if os.path.exists(config_file):
             try:
                 with open(config_file, "r") as f:
-                    config = json.load(f)
-                print("✓ Config loaded")
-                return config
+                    return json.load(f)
             except Exception as e:
                 print(f"Config load error: {e}")
 
         with open(config_file, "w") as f:
             json.dump(default_config, f, indent=4)
-
-        print(f"✓ Created default config: {config_file}")
-        print("⚠️ Edit pi_security_config.json with your phone number!")
+        print("⚠️ Created default config. Edit pi_security_config.json with your phone number!")
         return default_config
 
     def init_camera(self):
-        """Initialize Pi Camera using rpicam-still"""
-        try:
-            print("Initializing Pi Camera with rpicam-still...")
-
-            result = subprocess.run(["which", "rpicam-still"], capture_output=True)
-            if result.returncode != 0:
-                raise Exception("rpicam-still not found. Install with: sudo apt install rpicam-apps")
-
-            test_cmd = ["rpicam-still", "-t", "1", "--nopreview", "-o", "/dev/null"]
-            result = subprocess.run(test_cmd, capture_output=True, timeout=15)
-
-            if result.returncode == 0:
-                print("✓ Pi Camera ready (rpicam-still)")
-                return {"type": "rpicam"}
-            else:
-                raise Exception("Camera test failed")
-
-        except Exception as e:
-            print(f"✗ Camera init failed: {e}")
-            raise
+        """Open /dev/video0 camera (USB or PiCam driver)"""
+        w, h = self.config["camera_resolution"]
+        cap = cv2.VideoCapture(0)
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, w)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, h)
+        if not cap.isOpened():
+            raise RuntimeError("✗ Failed to open camera (/dev/video0)")
+        print("✅ Camera ready (/dev/video0)")
+        return cap
 
     def init_detector(self):
-        """Initialize offline YOLOv5n detector"""
-        try:
-            print("Loading offline YOLOv5n...")
+        """Load YOLOv5n model with DetectMultiBackend"""
+        model_path = self.config.get("model_path", "yolov5n.pt")
+        if not os.path.exists(model_path):
+            raise FileNotFoundError(
+                f"✗ Model file not found: {model_path}\n"
+                "Download with:\n"
+                "wget https://github.com/ultralytics/yolov5/releases/download/v7.0/yolov5n.pt"
+            )
 
-            model_path = self.config.get("model_path", "yolov5n.pt")
-            if not os.path.exists(model_path):
-                print(f"✗ Model file not found: {model_path}")
-                print("wget https://github.com/ultralytics/yolov5/releases/download/v7.0/yolov5n.pt")
-                raise FileNotFoundError(f"Model file {model_path} not found")
+        device = select_device("cpu")
+        model = DetectMultiBackend(model_path, device=device)
+        model.eval()
 
-            device = torch.device("cpu")
-
-            # Try safe load first
-            try:
-                model = torch.load(model_path, map_location=device, weights_only=True)
-            except Exception:
-                print("⚠️ Falling back: loading model with full unpickling...")
-                model = torch.load(model_path, map_location=device)
-
-            if isinstance(model, dict):
-                if "model" in model:
-                    model = model["model"]
-                elif "ema" in model:
-                    model = model["ema"]
-
-            model.eval()
-            model.to(device)
-            torch.set_num_threads(2)
-
-            # Subset of COCO class names
-            self.names = {0: "person", 15: "cat", 16: "dog"}
-
-            print("✓ Offline YOLOv5n ready")
-            return model
-
-        except Exception as e:
-            print(f"✗ Detector init failed: {e}")
-            raise
+        names = model.names if hasattr(model, "names") else {}
+        print("✅ YOLOv5n model loaded")
+        return model, device, names
 
     def init_sms(self):
-        """Initialize SIM7600G-H SMS"""
+        """Initialize SIM7600G-H for SMS alerts"""
         try:
-            print("Connecting to SIM7600G-H...")
-            port = self.config["sim7600_port"]
-
-            ser = serial.Serial(port=port, baudrate=115200, timeout=10)
+            print("📡 Connecting to SIM7600G-H...")
+            ser = serial.Serial(
+                port=self.config["sim7600_port"], baudrate=115200, timeout=10
+            )
             time.sleep(2)
 
             ser.write(b"AT\r\n")
             time.sleep(1)
-            response = ser.read(ser.in_waiting).decode("utf-8", errors="ignore")
-
-            if "OK" not in response:
+            if "OK" not in ser.read(ser.in_waiting).decode(errors="ignore"):
                 raise Exception("AT command failed")
 
             ser.write(b"AT+CMGF=1\r\n")
             time.sleep(1)
             ser.read(ser.in_waiting)
 
-            print("✓ SIM7600G-H ready")
+            print("✅ SIM7600G-H ready")
             return ser
-
         except Exception as e:
             print(f"✗ SIM7600G-H init failed: {e}")
             return None
 
-    def capture_frame(self):
-        """Capture frame using rpicam-still"""
+    def send_sms(self, message):
+        """Send SMS alert"""
+        if not self.sms:
+            print("⚠️ SMS not initialized")
+            return
         try:
-            with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
-                tmp_name = tmp.name
+            number = self.config["phone_number"]
+            self.sms.write(f'AT+CMGS="{number}"\r'.encode())
+            time.sleep(1)
+            self.sms.write(message.encode() + b"\x1A")
+            time.sleep(3)
+            print(f"📨 SMS sent to {number}: {message}")
+        except Exception as e:
+            print(f"✗ SMS send failed: {e}")
 
-            w, h = self.config["camera_resol_]()
+    def run(self):
+        """Main detection loop"""
+        print("🔍 Starting detection loop...")
+        while True:
+            ret, frame = self.cap.read()
+            if not ret:
+                print("✗ Frame grab failed")
+                continue
+
+            img = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            img = torch.from_numpy(img).permute(2, 0, 1).float().unsqueeze(0) / 255.0
+            img = img.to(self.device)
+
+            with torch.no_grad():
+                pred = self.model(img)
+                pred = non_max_suppression(
+                    pred,
+                    conf_thres=self.config["detection_confidence"],
+                    iou_thres=0.45,
+                )[0]
+
+            if pred is not None and len(pred):
+                for *box, conf, cls in pred.cpu().numpy():
+                    label = self.names.get(int(cls), "unknown")
+                    if label in self.config["target_objects"]:
+                        now = datetime.now()
+                        last_time = self.last_alert.get(label, datetime.min)
+                        if now - last_time > timedelta(
+                            minutes=self.cooldown_minutes
+                        ):
+                            msg = f"ALERT: {label} detected ({conf:.2f}) at {now}"
+                            print("🚨", msg)
+                            self.send_sms(msg)
+                            self.last_alert[label] = now
+
+            time.sleep(0.2)
+
+
+def main():
+    try:
+        system = PiSecuritySystem()
+        system.run()
+    except Exception as e:
+        print(f"✗ System failed: {e}")
+
+
+if __name__ == "__main__":
+    main()
