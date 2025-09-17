@@ -1,66 +1,45 @@
 #!/usr/bin/env python3
-# pi_security_2025.py - Pi Zero 2W + SIM7600G-H Security System with rpicam-still Human Detection
+# pi_security_2025.py - Pi Zero 2W + SIM7600G-H Rescue Bot with rpicam-still Human Detection
 
 import os
 import time
-import json
 import cv2
 import serial
 import subprocess
 from datetime import datetime, timedelta
 from ultralytics import YOLO
 
-class PiSecuritySystem2025:
+class PiSecurityRescueBot:
     def __init__(self):
-        print("🚀 Initializing Pi Security System 2025...")
+        print("🚀 Initializing Rescue Bot Pi Security System...")
 
-        # Load configuration
-        self.config = self.load_config()
+        # Hardcoded phone number for SMS alerts
+        self.phone_number = "+639514343942"
 
-        # Initialize SMS
+        # SMS / SIM7600G-H initialization
         self.sms = self.init_sms()
 
         # Human Detector (YOLO + rpicam-still)
         self.detector_model = YOLO("yolov5n.pt")
         self.human_class_id = 0  # COCO 'person'
-        self.confidence_threshold = self.config.get("detection_confidence", 0.5)
+        self.confidence_threshold = 0.5
         self.libcamera_cmd = "rpicam-still"
 
-        # Alert management
-        self.last_alert = {}
-        self.cooldown_minutes = self.config.get("alert_cooldown_minutes", 5)
+        # Alert cooldown
+        self.last_alert_time = datetime.min
+        self.cooldown_minutes = 5
 
-        print("✅ Pi Security System 2025 ready!")
+        # Detection log
+        self.log_file = "human_detections.txt"
 
-    def load_config(self):
-        """Load or create configuration"""
-        config_file = "pi_security_config_2025.json"
-        default_config = {
-            "phone_number": "+63XXXXXXXXXX",  # Replace with PH number
-            "sim7600_port": "/dev/ttyUSB2",
-            "detection_confidence": 0.5,
-            "alert_cooldown_minutes": 5,
-            "detection_log": "human_detections.txt"
-        }
-
-        if os.path.exists(config_file):
-            try:
-                with open(config_file, "r") as f:
-                    return json.load(f)
-            except Exception as e:
-                print(f"⚠️ Config load error: {e}")
-
-        with open(config_file, "w") as f:
-            json.dump(default_config, f, indent=4)
-        print("⚠️ Created default config. Edit pi_security_config_2025.json with your phone number!")
-        return default_config
+        print("✅ Rescue Bot ready!")
 
     def init_sms(self):
         """Initialize SIM7600G-H for SMS alerts"""
         try:
             print("📡 Connecting to SIM7600G-H...")
             ser = serial.Serial(
-                port=self.config["sim7600_port"], baudrate=115200, timeout=10
+                port="/dev/ttyUSB2", baudrate=115200, timeout=10
             )
             time.sleep(2)
             ser.write(b"AT\r\n")
@@ -77,17 +56,16 @@ class PiSecuritySystem2025:
             return None
 
     def send_sms(self, message):
-        """Send SMS alert"""
+        """Send SMS alert to the hardcoded number"""
         if not self.sms:
             print("⚠️ SMS not initialized")
             return
         try:
-            number = self.config["phone_number"]
-            self.sms.write(f'AT+CMGS="{number}"\r'.encode())
+            self.sms.write(f'AT+CMGS="{self.phone_number}"\r'.encode())
             time.sleep(1)
             self.sms.write(message.encode() + b"\x1A")
             time.sleep(3)
-            print(f"📨 SMS sent to {number}: {message}")
+            print(f"📨 SMS sent to {self.phone_number}: {message}")
         except Exception as e:
             print(f"✗ SMS send failed: {e}")
 
@@ -136,7 +114,7 @@ class PiSecuritySystem2025:
         """Log human detections to file"""
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         log_entry = f"{timestamp}: {count} humans detected\n"
-        with open(self.config.get("detection_log", "human_detections.txt"), "a") as f:
+        with open(self.log_file, "a") as f:
             f.write(log_entry)
         print(f"📝 {log_entry.strip()}")
 
@@ -151,20 +129,20 @@ class PiSecuritySystem2025:
                     if human_count > 0:
                         self.log_detection(human_count)
                         now = datetime.now()
-                        last_alert = self.last_alert.get("human", datetime.min)
-                        if now - last_alert > timedelta(minutes=self.cooldown_minutes):
-                            msg = f"ALERT: {human_count} human(s) detected at {now}"
+                        if now - self.last_alert_time > timedelta(minutes=self.cooldown_minutes):
+                            time_str = now.strftime("%H:%M:%S")
+                            msg = f"Human Detected at {time_str} at [GPS]"
                             print("🚨", msg)
                             self.send_sms(msg)
-                            self.last_alert["human"] = now
+                            self.last_alert_time = now
                 time.sleep(0.2)
         except KeyboardInterrupt:
             print("\n👋 Detection stopped by user")
 
 def main():
     try:
-        system = PiSecuritySystem2025()
-        system.run_detection_loop()
+        bot = PiSecurityRescueBot()
+        bot.run_detection_loop()
     except Exception as e:
         print(f"💥 System failed: {e}")
 
