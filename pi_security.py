@@ -1,9 +1,12 @@
-# pi_security_2025.py - Pi Zero 2W + SIM7600G-H Security System with Robust Human Detection
+#!/usr/bin/env python3
+# pi_security_2025.py - Pi Zero 2W + SIM7600G-H Security System with rpicam-still Human Detection
+
 import os
 import time
 import json
 import cv2
 import serial
+import subprocess
 from datetime import datetime, timedelta
 from ultralytics import YOLO
 
@@ -11,14 +14,17 @@ class PiSecuritySystem2025:
     def __init__(self):
         print("🚀 Initializing Pi Security System 2025...")
 
-        # Load config
+        # Load configuration
         self.config = self.load_config()
 
         # Initialize SMS
         self.sms = self.init_sms()
 
-        # Human Detector
-        self.detector = self.init_detector()
+        # Human Detector (YOLO + rpicam-still)
+        self.detector_model = YOLO("yolov5n.pt")
+        self.human_class_id = 0  # COCO 'person'
+        self.confidence_threshold = self.config.get("detection_confidence", 0.5)
+        self.libcamera_cmd = "rpicam-still"
 
         # Alert management
         self.last_alert = {}
@@ -30,12 +36,11 @@ class PiSecuritySystem2025:
         """Load or create configuration"""
         config_file = "pi_security_config_2025.json"
         default_config = {
-            "phone_number": "+1234567890",
+            "phone_number": "+63XXXXXXXXXX",  # Replace with PH number
             "sim7600_port": "/dev/ttyUSB2",
             "detection_confidence": 0.5,
             "alert_cooldown_minutes": 5,
-            "camera_resolution": [640, 480],
-            "detection_duration_sec": 300
+            "detection_log": "human_detections.txt"
         }
 
         if os.path.exists(config_file):
@@ -43,21 +48,12 @@ class PiSecuritySystem2025:
                 with open(config_file, "r") as f:
                     return json.load(f)
             except Exception as e:
-                print(f"Config load error: {e}")
+                print(f"⚠️ Config load error: {e}")
 
         with open(config_file, "w") as f:
             json.dump(default_config, f, indent=4)
         print("⚠️ Created default config. Edit pi_security_config_2025.json with your phone number!")
         return default_config
-
-    def init_detector(self):
-        """Initialize robust human detector (YOLOv5n)"""
-        try:
-            print("📥 Loading YOLOv5n human detector...")
-            detector = YOLO("yolov5n.pt")
-            return detector
-        except Exception as e:
-            raise RuntimeError(f"✗ Failed to load YOLO model: {e}")
 
     def init_sms(self):
         """Initialize SIM7600G-H for SMS alerts"""
@@ -67,16 +63,13 @@ class PiSecuritySystem2025:
                 port=self.config["sim7600_port"], baudrate=115200, timeout=10
             )
             time.sleep(2)
-
             ser.write(b"AT\r\n")
             time.sleep(1)
             if "OK" not in ser.read(ser.in_waiting).decode(errors="ignore"):
                 raise Exception("AT command failed")
-
             ser.write(b"AT+CMGF=1\r\n")
             time.sleep(1)
             ser.read(ser.in_waiting)
-
             print("✅ SIM7600G-H ready")
             return ser
         except Exception as e:
@@ -99,66 +92,71 @@ class PiSecuritySystem2025:
             print(f"✗ SMS send failed: {e}")
 
     def capture_frame(self):
-        """Try multiple camera methods (OpenCV or libcamera)"""
-        # Use OpenCV
+        """Capture frame using rpicam-still"""
+        filename = f"temp_{int(time.time()*1000)}.jpg"
         try:
-            cap = cv2.VideoCapture(0)
-            w, h = self.config["camera_resolution"]
-            cap.set(cv2.CAP_PROP_FRAME_WIDTH, w)
-            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, h)
-            ret, frame = cap.read()
-            cap.release()
-            if ret:
+            subprocess.run(
+                [self.libcamera_cmd, "-o", filename, "--timeout", "0.5"],
+                capture_output=True,
+                timeout=2
+            )
+            if os.path.exists(filename):
+                frame = cv2.imread(filename)
+                os.remove(filename)
                 return frame
-        except:
-            pass
-
-        # Could add libcamera fallback here if needed
+        except Exception as e:
+            print(f"⚠️ Capture error: {e}")
         return None
 
     def detect_humans(self, frame):
-        """Detect humans using YOLOv5n"""
+        """Detect humans in a frame using YOLOv5n"""
         if frame is None:
             return 0, []
 
         try:
-            # Convert BGR to RGB
             frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            results = self.detector(frame_rgb, verbose=False)
-
+            results = self.detector_model(frame_rgb, verbose=False)
             human_count = 0
             human_boxes = []
-            for box in results[0].boxes:
-                if int(box.cls[0]) == 0 and float(box.conf[0]) >= self.config["detection_confidence"]:
-                    human_count += 1
-                    x1, y1, x2, y2 = box.xyxy[0].cpu().numpy().astype(int)
-                    confidence = float(box.conf[0])
-                    human_boxes.append((x1, y1, x2, y2, confidence))
+
+            if results[0].boxes is not None:
+                for box in results[0].boxes:
+                    if int(box.cls[0]) == self.human_class_id and float(box.conf[0]) >= self.confidence_threshold:
+                        human_count += 1
+                        x1, y1, x2, y2 = box.xyxy[0].cpu().numpy().astype(int)
+                        confidence = float(box.conf[0])
+                        human_boxes.append((x1, y1, x2, y2, confidence))
+
             return human_count, human_boxes
         except Exception as e:
             print(f"⚠️ Detection error: {e}")
             return 0, []
 
+    def log_detection(self, count):
+        """Log human detections to file"""
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        log_entry = f"{timestamp}: {count} humans detected\n"
+        with open(self.config.get("detection_log", "human_detections.txt"), "a") as f:
+            f.write(log_entry)
+        print(f"📝 {log_entry.strip()}")
+
     def run_detection_loop(self):
-        """Main detection loop"""
-        duration = self.config.get("detection_duration_sec", 300)
-        start_time = time.time()
-        print(f"🔍 Starting human detection for {duration} seconds...")
-
+        """Run detection indefinitely until stopped"""
+        print("🔍 Starting human detection loop (press Ctrl+C to stop)...")
         try:
-            while (time.time() - start_time) < duration:
+            while True:
                 frame = self.capture_frame()
-                human_count, boxes = self.detect_humans(frame)
-
-                if human_count > 0:
-                    now = datetime.now()
-                    last_alert = self.last_alert.get("human", datetime.min)
-                    if now - last_alert > timedelta(minutes=self.cooldown_minutes):
-                        msg = f"ALERT: {human_count} human(s) detected at {now}"
-                        print("🚨", msg)
-                        self.send_sms(msg)
-                        self.last_alert["human"] = now
-
+                if frame is not None:
+                    human_count, boxes = self.detect_humans(frame)
+                    if human_count > 0:
+                        self.log_detection(human_count)
+                        now = datetime.now()
+                        last_alert = self.last_alert.get("human", datetime.min)
+                        if now - last_alert > timedelta(minutes=self.cooldown_minutes):
+                            msg = f"ALERT: {human_count} human(s) detected at {now}"
+                            print("🚨", msg)
+                            self.send_sms(msg)
+                            self.last_alert["human"] = now
                 time.sleep(0.2)
         except KeyboardInterrupt:
             print("\n👋 Detection stopped by user")
