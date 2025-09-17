@@ -155,89 +155,83 @@ class PiDetector:
 
 class PiCamera:
     def __init__(self):
-        print("Initializing Pi Camera v2...")
+        print("Initializing Pi Camera v2 with rpicam...")
         try:
-            from picamera2 import Picamera2
-            self.picam2 = Picamera2()
+            import subprocess
             
-            # Configure for low resolution to save processing power
-            config = self.picam2.create_still_configuration(
-                main={"size": (640, 480)},  # Lower resolution for Pi Zero 2W
-                lores={"size": (320, 240)}, # Even lower for preview
-                display="lores"
-            )
+            # Test if rpicam-still is available
+            result = subprocess.run(['which', 'rpicam-still'], capture_output=True)
+            if result.returncode != 0:
+                raise Exception("rpicam-still not found")
             
-            self.picam2.configure(config)
-            self.picam2.start()
+            # Test camera with a quick capture
+            test_cmd = ['rpicam-still', '-t', '1', '--nopreview', '-o', '/dev/null']
+            result = subprocess.run(test_cmd, capture_output=True, timeout=10)
             
-            # Let camera warm up
-            time.sleep(2)
-            print("✓ Pi Camera v2 ready")
-            
-        except ImportError:
-            print("picamera2 not available, trying rpicam method...")
-            self.use_rpicam = True
-            self.picam2 = None
-            print("✓ Using rpicam method")
+            if result.returncode == 0:
+                print("✓ Pi Camera v2 ready (rpicam)")
+            else:
+                print(f"Camera test failed: {result.stderr.decode()}")
+                raise Exception("Camera test failed")
+                
         except Exception as e:
             print(f"✗ Camera init failed: {e}")
             print("Make sure camera is enabled: sudo raspi-config")
-            print("Or install: sudo apt install python3-picamera2")
+            print("Interface Options -> Camera -> Enable")
             raise
     
     def capture_frame(self):
-        """Capture frame from Pi camera"""
+        """Capture frame from Pi camera using rpicam-still"""
         try:
-            if hasattr(self, 'use_rpicam') and self.use_rpicam:
-                # Use rpicam-still command
-                import subprocess
-                import tempfile
-                
-                # Capture to temporary file
-                with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as tmp:
-                    cmd = [
-                        'rpicam-still',
-                        '-o', tmp.name,
-                        '--width', '640',
-                        '--height', '480',
-                        '--timeout', '1',
-                        '--nopreview'
-                    ]
-                    
-                    result = subprocess.run(cmd, capture_output=True)
-                    if result.returncode == 0:
-                        # Read image file
-                        frame = cv2.imread(tmp.name)
-                        os.unlink(tmp.name)  # Clean up temp file
-                        
-                        if frame is not None:
-                            return True, frame
-                    else:
-                        print(f"rpicam-still error: {result.stderr.decode()}")
-                        return False, None
-            else:
-                # Use picamera2 method
-                frame = self.picam2.capture_array()
-                
-                # Convert from RGB to BGR for OpenCV
-                if len(frame.shape) == 3:
-                    frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-                    
-                return True, frame
+            import subprocess
+            import tempfile
             
+            # Create temporary file for image
+            with tempfile.NamedTemporaryFile(suffix='.jpg', delete=False) as tmp:
+                tmp_name = tmp.name
+            
+            # Capture image with rpicam-still
+            cmd = [
+                'rpicam-still',
+                '-o', tmp_name,
+                '--width', '640',
+                '--height', '480',
+                '-t', '1',  # 1ms timeout for fast capture
+                '--nopreview'
+            ]
+            
+            result = subprocess.run(cmd, capture_output=True, timeout=10)
+            
+            if result.returncode == 0:
+                # Read the captured image
+                frame = cv2.imread(tmp_name)
+                
+                # Clean up temp file
+                try:
+                    os.unlink(tmp_name)
+                except:
+                    pass
+                
+                if frame is not None:
+                    return True, frame
+                else:
+                    print("Failed to read captured image")
+                    return False, None
+            else:
+                error_msg = result.stderr.decode() if result.stderr else "Unknown error"
+                print(f"rpicam-still failed: {error_msg}")
+                return False, None
+                
+        except subprocess.TimeoutExpired:
+            print("Camera capture timeout")
+            return False, None
         except Exception as e:
-            print(f"Camera capture failed: {e}")
+            print(f"Camera capture error: {e}")
             return False, None
     
     def release(self):
-        """Clean up camera"""
-        try:
-            if hasattr(self, 'picam2') and self.picam2:
-                self.picam2.stop()
-                self.picam2.close()
-            print("✓ Camera released")
-        except:
-            pass
+        """Clean up camera - nothing to do for rpicam"""
+        print("✓ Camera released")
 
 def main():
     """Test detection with Pi camera"""
