@@ -6,7 +6,7 @@ import time
 import cv2
 import serial
 import subprocess
-from datetime import datetime, timedelta
+from datetime import datetime
 from ultralytics import YOLO
 
 class PiSecurityRescueBot:
@@ -25,11 +25,7 @@ class PiSecurityRescueBot:
         self.confidence_threshold = 0.5
         self.libcamera_cmd = "rpicam-still"
 
-        # Alert cooldown
-        self.last_alert_time = datetime.min
-        self.cooldown_minutes = 5
-
-        # Detection log
+        # Detection log file
         self.log_file = "human_detections.txt"
 
         print("✅ Rescue Bot ready!")
@@ -46,7 +42,7 @@ class PiSecurityRescueBot:
             time.sleep(1)
             if "OK" not in ser.read(ser.in_waiting).decode(errors="ignore"):
                 raise Exception("AT command failed")
-            ser.write(b"AT+CMGF=1\r\n")
+            ser.write(b"AT+CMGF=1\r\n")  # Set SMS text mode
             time.sleep(1)
             ser.read(ser.in_waiting)
             print("✅ SIM7600G-H ready")
@@ -74,7 +70,7 @@ class PiSecurityRescueBot:
         filename = f"temp_{int(time.time()*1000)}.jpg"
         try:
             subprocess.run(
-                [self.libcamera_cmd, "-o", filename, "--timeout", "0.5"],
+                [self.libcamera_cmd, "-o", filename, "--timeout", "500"],
                 capture_output=True,
                 timeout=2
             )
@@ -89,31 +85,27 @@ class PiSecurityRescueBot:
     def detect_humans(self, frame):
         """Detect humans in a frame using YOLOv5n"""
         if frame is None:
-            return 0, []
+            return 0
 
         try:
             frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             results = self.detector_model(frame_rgb, verbose=False)
             human_count = 0
-            human_boxes = []
 
             if results[0].boxes is not None:
                 for box in results[0].boxes:
                     if int(box.cls[0]) == self.human_class_id and float(box.conf[0]) >= self.confidence_threshold:
                         human_count += 1
-                        x1, y1, x2, y2 = box.xyxy[0].cpu().numpy().astype(int)
-                        confidence = float(box.conf[0])
-                        human_boxes.append((x1, y1, x2, y2, confidence))
 
-            return human_count, human_boxes
+            return human_count
         except Exception as e:
             print(f"⚠️ Detection error: {e}")
-            return 0, []
+            return 0
 
     def log_detection(self, count):
         """Log human detections to file"""
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        log_entry = f"{timestamp}: {count} humans detected\n"
+        log_entry = f"{timestamp}: {count} human(s) detected\n"
         with open(self.log_file, "a") as f:
             f.write(log_entry)
         print(f"📝 {log_entry.strip()}")
@@ -125,17 +117,14 @@ class PiSecurityRescueBot:
             while True:
                 frame = self.capture_frame()
                 if frame is not None:
-                    human_count, boxes = self.detect_humans(frame)
+                    human_count = self.detect_humans(frame)
                     if human_count > 0:
                         self.log_detection(human_count)
-                        now = datetime.now()
-                        if now - self.last_alert_time > timedelta(minutes=self.cooldown_minutes):
-                            time_str = now.strftime("%H:%M:%S")
-                            msg = f"Human Detected at {time_str} at [GPS]"
-                            print("🚨", msg)
-                            self.send_sms(msg)
-                            self.last_alert_time = now
-                time.sleep(0.2)
+                        time_str = datetime.now().strftime("%H:%M:%S")
+                        msg = f"🚨 {human_count} human(s) detected at {time_str} [GPS]"
+                        print("🚨", msg)
+                        self.send_sms(msg)
+                time.sleep(1)
         except KeyboardInterrupt:
             print("\n👋 Detection stopped by user")
 
